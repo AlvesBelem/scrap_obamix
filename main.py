@@ -8,10 +8,16 @@ from config.settings import DB_CONFIG
 LOGIN_URL = "https://app.obaobamix.com.br/login"
 PRODUCTS_URL = "https://app.obaobamix.com.br/admin/products"
 
-# Define um limite de páginas via variável de ambiente.
-# Para o teste atual, configure SCRAPER_PAGE_LIMIT=2.
-PAGE_LIMIT = os.getenv("SCRAPER_PAGE_LIMIT")
-PAGE_LIMIT = int(PAGE_LIMIT) if PAGE_LIMIT and PAGE_LIMIT.isdigit() else None
+DEFAULT_TEST_PAGE_LIMIT = 2
+PAGE_LIMIT_ENV = os.getenv("SCRAPER_PAGE_LIMIT")
+
+try:
+    PAGE_LIMIT = int(PAGE_LIMIT_ENV) if PAGE_LIMIT_ENV else DEFAULT_TEST_PAGE_LIMIT
+except ValueError:
+    PAGE_LIMIT = DEFAULT_TEST_PAGE_LIMIT
+
+if PAGE_LIMIT and PAGE_LIMIT <= 0:
+    PAGE_LIMIT = None
 
 
 def prompt_manual_login(driver) -> None:

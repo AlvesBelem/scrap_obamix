@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -5,12 +7,16 @@ import psycopg2
 from psycopg2 import OperationalError, errorcodes, sql
 from psycopg2.extras import execute_batch
 
+BASE_DIR = Path(__file__).resolve().parents[1]
+EXPORT_XLSX_PATH = BASE_DIR / "produtos_export.xlsx"
+
 PRODUCTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS products (
     product_id INTEGER PRIMARY KEY,
     sku TEXT,
     name TEXT,
     price_brl NUMERIC(12, 2),
+    price_venda NUMERIC(12, 2),
     price_min_brl NUMERIC(12, 2),
     brand TEXT,
     model TEXT,
@@ -99,15 +105,15 @@ DETAIL_TABLES_SQL = [
 
 UPSERT_PRODUCTS_SQL = """
 INSERT INTO products (
-    product_id, sku, name, price_brl, price_min_brl, brand, model, color, voltage,
-    ean, ncm, anatel, inmetro, weight_kg, dimensions_cm, description_html,
+    product_id, sku, name, price_brl, price_venda, price_min_brl, brand, model, color,
+    voltage, ean, ncm, anatel, inmetro, weight_kg, dimensions_cm, description_html,
     notices_html, stock_label, stock_tooltip, available_qty, listing_sku,
     listing_name, listing_color, listing_brand, listing_model, listing_price_text,
     listing_stock_badge, listing_stock_tooltip, listing_available_qty,
     listing_thumbnail, listing_thumbnail_full, main_image, main_image_full,
     video_url, scrape_error
 ) VALUES (
-    %(product_id)s, %(sku)s, %(name)s, %(price_brl)s, %(price_min_brl)s, %(brand)s,
+    %(product_id)s, %(sku)s, %(name)s, %(price_brl)s, %(price_venda)s, %(price_min_brl)s, %(brand)s,
     %(model)s, %(color)s, %(voltage)s, %(ean)s, %(ncm)s, %(anatel)s, %(inmetro)s,
     %(weight_kg)s, %(dimensions_cm)s, %(description_html)s, %(notices_html)s,
     %(stock_label)s, %(stock_tooltip)s, %(available_qty)s, %(listing_sku)s,
@@ -120,6 +126,7 @@ ON CONFLICT (product_id) DO UPDATE SET
     sku = EXCLUDED.sku,
     name = EXCLUDED.name,
     price_brl = EXCLUDED.price_brl,
+    price_venda = EXCLUDED.price_venda,
     price_min_brl = EXCLUDED.price_min_brl,
     brand = EXCLUDED.brand,
     model = EXCLUDED.model,
@@ -203,7 +210,13 @@ def connect_db(config: Dict[str, Any], attempt_create: bool = True):
             port=config["port"],
         )
     except OperationalError as exc:
-        db_missing = getattr(exc, "pgcode", None) == errorcodes.INVALID_CATALOG_NAME
+        pgcode = getattr(exc, "pgcode", None)
+        message = str(exc).lower()
+        db_missing = (
+            pgcode == errorcodes.INVALID_CATALOG_NAME
+            or "does not exist" in message
+            or "não existe" in message
+        )
         if not attempt_create or not db_missing:
             raise
 
@@ -239,6 +252,7 @@ def save_products(products: List[Dict[str, Any]], config: Dict[str, Any]) -> int
         return 0
 
     frames = _build_frames(products)
+    _export_to_excel(frames)
     product_ids = frames["products"]["product_id"].tolist()
 
     conn = connect_db(config)
@@ -297,6 +311,7 @@ def save_products(products: List[Dict[str, Any]], config: Dict[str, Any]) -> int
 
 def _ensure_tables(cur) -> None:
     cur.execute(PRODUCTS_TABLE_SQL)
+    cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS price_venda NUMERIC(12, 2);")
     for ddl in DETAIL_TABLES_SQL:
         cur.execute(ddl)
 
@@ -318,6 +333,7 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
                 "sku": p.get("sku") or p.get("listing_sku"),
                 "name": p.get("name") or p.get("listing_name"),
                 "price_brl": p.get("price_brl"),
+                "price_venda": None,  # placeholder for insertion order
                 "price_min_brl": p.get("price_min_brl"),
                 "brand": p.get("brand") or p.get("listing_brand"),
                 "model": p.get("model") or p.get("listing_model"),
@@ -353,6 +369,8 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
             for p in products
         ]
     )
+
+    df_products = _inject_price_venda(df_products)
 
     df_categories = _build_simple_frame(products, "categories", "category")
     df_flags = _build_dict_frame(products, "flags", ["label", "tooltip"])
@@ -391,3 +409,39 @@ def _build_dict_frame(products: List[Dict[str, Any]], key: str, columns: List[st
                 row[column] = entry.get(column)
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _inject_price_venda(df_products: pd.DataFrame) -> pd.DataFrame:
+    if df_products.empty:
+        df_products["price_venda"] = pd.Series(dtype=float)
+        return df_products
+
+    def calc_price_venda(value):
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return decimal_value * Decimal("2.56")
+
+    df_products["price_venda"] = df_products["price_brl"].apply(calc_price_venda)
+    columns = df_products.columns.tolist()
+    price_idx = columns.index("price_brl")
+    # move price_venda to immediately after price_brl
+    columns.insert(price_idx + 1, columns.pop(columns.index("price_venda")))
+    return df_products[columns]
+
+
+def _export_to_excel(frames: Dict[str, pd.DataFrame]) -> None:
+    EXPORT_XLSX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(EXPORT_XLSX_PATH, engine="openpyxl") as writer:
+        for name, frame in frames.items():
+            sheet_name = name[:31]
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)

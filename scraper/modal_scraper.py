@@ -177,12 +177,26 @@ def _collect_list_items(context, container_selector: str) -> List[str]:
     container = context.find_elements(By.CSS_SELECTOR, container_selector)
     if not container:
         return []
+
     items = []
     for li in container[0].find_elements(By.TAG_NAME, "li"):
         text = li.text.strip()
         if text:
             items.append(text)
-    return items
+
+    if items:
+        return items
+
+    # fallback para quando o HTML chega apenas como texto formatado
+    raw_text = container[0].text.strip()
+    if not raw_text:
+        return []
+
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    if lines and lines[0].endswith(":"):
+        lines = lines[1:]
+
+    return lines
 
 
 def _collect_gallery(modal, main_src: Optional[str], main_href: Optional[str]) -> List[Dict[str, Any]]:
