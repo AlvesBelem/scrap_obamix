@@ -1,0 +1,79 @@
+# Byte-compiled / optimized / DLL files
+/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+/venv/
+.env/
+.venv/
+env/
+ENV/
+Pipfile.lock
+
+# dotenv environment variables
+*.env
+.env.*
+
+# VSCode
+.vscode/
+.history/
+
+# IDEs
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database/backups
+*.sqlite3
+*.db
+*.bak
+*.sql
+*.dump
+
+# Selenium downloads / cache
+selenium-screenshots/
+selenium_downloads/
+
+# Test reports
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Jupyter
+.ipynb_checkpoints
+
+# Compiled C extensions
+*.so
+
+# Wheels
+*.whl
+
+# Dist
+build/
+dist/
+*.egg-info/
+
+# Google credentials (if used later)
+token.json
+credentials.json
+
+# PyInstaller
+*.spec
+
+# Temporary files
+*.tmp
+*.temp
+*.~*
+
+# VS Code testing
+__test__/
+.pytest_cache/
+.cache/
