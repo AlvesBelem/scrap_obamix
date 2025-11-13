@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +15,7 @@ HALF_DECIMAL = Decimal("0.50")
 EXPORT_XLSX_PATH = BASE_DIR / "produtos_export.xlsx"
 OPTIONAL_CONN_KEYS = {"sslmode", "sslrootcert", "sslcert", "sslkey", "options", "channel_binding"}
 INT32_MAX = 2_147_483_647
+DIMENSION_PATTERN = re.compile(r"\d+(?:[.,]\d+)?")
 
 PRODUCTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS products (
@@ -33,11 +35,14 @@ CREATE TABLE IF NOT EXISTS products (
     inmetro TEXT,
     weight_kg NUMERIC(10, 3),
     dimensions_cm TEXT,
+    dimension_height_cm NUMERIC(10, 2),
+    dimension_width_cm NUMERIC(10, 2),
+    dimension_depth_cm NUMERIC(10, 2),
     description_html TEXT,
     notices_html TEXT,
     stock_label TEXT,
     stock_tooltip TEXT,
-    available_qty INTEGER,
+    available_qty BIGINT,
     listing_sku TEXT,
     listing_name TEXT,
     listing_color TEXT,
@@ -46,7 +51,7 @@ CREATE TABLE IF NOT EXISTS products (
     listing_price_text TEXT,
     listing_stock_badge TEXT,
     listing_stock_tooltip TEXT,
-    listing_available_qty INTEGER,
+    listing_available_qty BIGINT,
     listing_thumbnail TEXT,
     listing_thumbnail_full TEXT,
     main_image TEXT,
@@ -112,20 +117,22 @@ UPSERT_PRODUCTS_SQL = """
 INSERT INTO products (
     product_id, sku, name, price_brl, price_venda, price_min_brl, brand, model, color,
     voltage, ean, ncm, anatel, inmetro, weight_kg, dimensions_cm, description_html,
-    notices_html, stock_label, stock_tooltip, available_qty, listing_sku,
-    listing_name, listing_color, listing_brand, listing_model, listing_price_text,
-    listing_stock_badge, listing_stock_tooltip, listing_available_qty,
+    notices_html, stock_label, stock_tooltip, available_qty, dimension_height_cm,
+    dimension_width_cm, dimension_depth_cm, listing_sku, listing_name, listing_color,
+    listing_brand, listing_model, listing_price_text, listing_stock_badge,
+    listing_stock_tooltip, listing_available_qty,
     listing_thumbnail, listing_thumbnail_full, main_image, main_image_full,
     video_url, scrape_error
 ) VALUES (
     %(product_id)s, %(sku)s, %(name)s, %(price_brl)s, %(price_venda)s, %(price_min_brl)s, %(brand)s,
     %(model)s, %(color)s, %(voltage)s, %(ean)s, %(ncm)s, %(anatel)s, %(inmetro)s,
     %(weight_kg)s, %(dimensions_cm)s, %(description_html)s, %(notices_html)s,
-    %(stock_label)s, %(stock_tooltip)s, %(available_qty)s, %(listing_sku)s,
-    %(listing_name)s, %(listing_color)s, %(listing_brand)s, %(listing_model)s,
-    %(listing_price_text)s, %(listing_stock_badge)s, %(listing_stock_tooltip)s,
-    %(listing_available_qty)s, %(listing_thumbnail)s, %(listing_thumbnail_full)s,
-    %(main_image)s, %(main_image_full)s, %(video_url)s, %(scrape_error)s
+    %(stock_label)s, %(stock_tooltip)s, %(available_qty)s, %(dimension_height_cm)s,
+    %(dimension_width_cm)s, %(dimension_depth_cm)s, %(listing_sku)s, %(listing_name)s,
+    %(listing_color)s, %(listing_brand)s, %(listing_model)s, %(listing_price_text)s,
+    %(listing_stock_badge)s, %(listing_stock_tooltip)s, %(listing_available_qty)s,
+    %(listing_thumbnail)s, %(listing_thumbnail_full)s, %(main_image)s,
+    %(main_image_full)s, %(video_url)s, %(scrape_error)s
 )
 ON CONFLICT (product_id) DO UPDATE SET
     sku = EXCLUDED.sku,
@@ -148,6 +155,9 @@ ON CONFLICT (product_id) DO UPDATE SET
     stock_label = EXCLUDED.stock_label,
     stock_tooltip = EXCLUDED.stock_tooltip,
     available_qty = EXCLUDED.available_qty,
+    dimension_height_cm = EXCLUDED.dimension_height_cm,
+    dimension_width_cm = EXCLUDED.dimension_width_cm,
+    dimension_depth_cm = EXCLUDED.dimension_depth_cm,
     listing_sku = EXCLUDED.listing_sku,
     listing_name = EXCLUDED.listing_name,
     listing_color = EXCLUDED.listing_color,
@@ -306,6 +316,13 @@ def save_products(products: List[Dict[str, Any]], config: Dict[str, Any]) -> int
 def _ensure_tables(cur) -> None:
     cur.execute(PRODUCTS_TABLE_SQL)
     cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS price_venda NUMERIC(12, 2);")
+    cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS dimension_height_cm NUMERIC(10, 2);")
+    cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS dimension_width_cm NUMERIC(10, 2);")
+    cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS dimension_depth_cm NUMERIC(10, 2);")
+    cur.execute("ALTER TABLE products ALTER COLUMN available_qty TYPE BIGINT USING available_qty::bigint;")
+    cur.execute(
+        "ALTER TABLE products ALTER COLUMN listing_available_qty TYPE BIGINT USING listing_available_qty::bigint;"
+    )
     for ddl in DETAIL_TABLES_SQL:
         cur.execute(ddl)
 
@@ -325,11 +342,13 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
         product_id = _sanitize_int(p.get("product_id"))
         if product_id is None:
             raise ValueError(f"Produto sem ID válido na coleta: {p}")
+        p["_sanitized_product_id"] = product_id
 
         available_qty = _coalesce_int(
             _sanitize_int(p.get("available_qty")),
             _sanitize_int(p.get("listing_available_qty")),
         )
+        dim_height, dim_width, dim_depth = _split_dimensions(p.get("dimensions_cm"))
 
         product_rows.append(
             {
@@ -338,7 +357,7 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
                 "name": p.get("name") or p.get("listing_name"),
                 "price_brl": p.get("price_brl"),
                 "price_venda": None,  # placeholder for insertion order
-                "price_min_brl": p.get("price_min_brl"),
+                "price_min_brl": _format_price_min(p.get("price_min_brl")),
                 "brand": p.get("brand") or p.get("listing_brand"),
                 "model": p.get("model") or p.get("listing_model"),
                 "color": p.get("color") or p.get("listing_color"),
@@ -349,6 +368,9 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
                 "inmetro": p.get("inmetro"),
                 "weight_kg": p.get("weight_kg"),
                 "dimensions_cm": p.get("dimensions_cm"),
+                "dimension_height_cm": dim_height,
+                "dimension_width_cm": dim_width,
+                "dimension_depth_cm": dim_depth,
                 "description_html": p.get("description_html"),
                 "notices_html": p.get("notices_html"),
                 "stock_label": p.get("stock_label") or p.get("listing_stock_badge"),
@@ -373,6 +395,12 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
         )
 
     df_products = pd.DataFrame(product_rows)
+    for column in ("product_id", "available_qty", "listing_available_qty"):
+        if column in df_products.columns:
+            df_products[column] = df_products[column].apply(_sanitize_int)
+
+    if df_products["product_id"].isnull().any():
+        raise ValueError("Produto com ID inválido após sanitização.")
 
     df_products = _inject_price_venda(df_products)
 
@@ -398,8 +426,9 @@ def _build_simple_frame(products: List[Dict[str, Any]], key: str, column_name: s
     rows = []
     for product in products:
         values = product.get(key) or []
+        product_id = _product_id_value(product)
         for value in values:
-            rows.append({"product_id": product["product_id"], column_name: value})
+            rows.append({"product_id": product_id, column_name: value})
     return pd.DataFrame(rows)
 
 
@@ -407,8 +436,9 @@ def _build_dict_frame(products: List[Dict[str, Any]], key: str, columns: List[st
     rows: List[Dict[str, Any]] = []
     for product in products:
         entries = product.get(key) or []
+        product_id = _product_id_value(product)
         for entry in entries:
-            row = {"product_id": product["product_id"]}
+            row = {"product_id": product_id}
             for column in columns:
                 row[column] = entry.get(column)
             rows.append(row)
@@ -499,6 +529,61 @@ def _sanitize_int(value: Any) -> Optional[int]:
     if integer > INT32_MAX:
         integer = INT32_MAX
     return integer
+
+
+def _product_id_value(product: Dict[str, Any]) -> Optional[int]:
+    value = product.get("_sanitized_product_id")
+    if value is not None:
+        return value
+    return _sanitize_int(product.get("product_id"))
+
+
+def _split_dimensions(value: Any) -> tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+    if not value:
+        return None, None, None
+
+    text = str(value)
+    parts = DIMENSION_PATTERN.findall(text)
+    if len(parts) >= 3:
+        return _to_decimal(parts[0]), _to_decimal(parts[1]), _to_decimal(parts[2])
+
+    digits_only = re.sub(r"\D", "", text)
+    if len(digits_only) >= 6:
+        height = digits_only[:2]
+        depth = digits_only[-2:]
+        middle = digits_only[2:-2]
+        return _to_decimal(height), _to_decimal(middle), _to_decimal(depth)
+
+    if len(parts) == 2:
+        return _to_decimal(parts[0]), None, _to_decimal(parts[1])
+    if len(parts) == 1:
+        single = _to_decimal(parts[0])
+        return single, None, None
+    return None, None, None
+
+
+def _to_decimal(value: str | None) -> Optional[Decimal]:
+    if not value:
+        return None
+    try:
+        return Decimal(value.replace(",", "."))
+    except (InvalidOperation, AttributeError):
+        return None
+
+
+def _format_price_min(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+    integer_part = decimal_value.to_integral_value(rounding=ROUND_DOWN)
+    if integer_part < 0:
+        integer_part = Decimal("0")
+    formatted = integer_part + PRICE_SUFFIX
+    return formatted.quantize(Decimal("0.01"))
 
 
 def _export_to_excel(frames: Dict[str, pd.DataFrame]) -> None:
