@@ -1,17 +1,18 @@
 import os
+from typing import Any, Dict, List
 
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.common.by import By
 
 from scraper.browser import start_browser
 from scraper.list_scraper import scrape_all_products
-from db.postgres import save_products
+from db.postgres import save_products, export_products_to_excel
 from config.settings import DATABASE_TARGETS, LOGIN_EMAIL, LOGIN_PASSWORD
 
 LOGIN_URL = "https://app.obaobamix.com.br/login"
 PRODUCTS_URL = "https://app.obaobamix.com.br/admin/products"
 
-DEFAULT_TEST_PAGE_LIMIT = 5
+DEFAULT_TEST_PAGE_LIMIT = None
 PAGE_LIMIT_ENV = os.getenv("SCRAPER_PAGE_LIMIT")
 
 try:
@@ -56,18 +57,25 @@ def main():
         prompt_manual_login(driver)
         driver.get(PRODUCTS_URL)
 
-        products = scrape_all_products(driver, page_limit=PAGE_LIMIT)
+        def persist_page(batch: List[Dict[str, Any]], page_number: int):
+            if not batch:
+                print(f"[Scraper] Página {page_number} sem produtos para gravar.")
+                return
+            for label, db_config in DATABASE_TARGETS:
+                try:
+                    persisted = save_products(batch, db_config, export=False)
+                    print(f"[Scraper][{label}][Página {page_number}] {persisted} registros gravados.")
+                except Exception as exc:
+                    print(f"[Scraper][{label}][Página {page_number}] Falha ao gravar: {exc}")
+                    if label == "local":
+                        raise
+
+        products = scrape_all_products(driver, page_limit=PAGE_LIMIT, on_page=persist_page)
         print(f"[Scraper] {len(products)} produtos coletados.")
 
         if products:
-            for label, db_config in DATABASE_TARGETS:
-                try:
-                    persisted = save_products(products, db_config)
-                    print(f"[Scraper][{label}] {persisted} registros gravados.")
-                except Exception as exc:
-                    print(f"[Scraper][{label}] Falha ao gravar: {exc}")
-                    if label == "local":
-                        raise
+            export_products_to_excel(products)
+            print(f"[Scraper] Exportação Excel atualizada com {len(products)} registros.")
         else:
             print("[Scraper] Nenhum produto para gravar.")
     finally:

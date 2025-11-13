@@ -10,6 +10,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 MODAL_ID = "viewProduct"
 INT32_MAX = 2_147_483_647
+QTY_MAX = 1_000_000
 TAB_CONTENT_TIMEOUT = 15
 _QUANTITY_PATTERN = re.compile(r"\d{1,3}(?:[.\s]\d{3})+|\d+")
 
@@ -149,7 +150,7 @@ def _parse_decimal(value: Optional[str]) -> Optional[Decimal]:
         return None
 
 
-def _parse_quantity(raw: Optional[str]) -> Optional[int]:
+def _parse_quantity(raw: Optional[str], limit: int = QTY_MAX) -> Optional[int]:
     if not raw:
         return None
     cleaned = raw.replace("\xa0", " ").strip()
@@ -162,7 +163,7 @@ def _parse_quantity(raw: Optional[str]) -> Optional[int]:
     if not digits_only:
         return None
     value = int(digits_only)
-    return min(value, INT32_MAX)
+    return min(value, limit)
 
 
 def _collect_badge_values(context, selector: str) -> List[str]:

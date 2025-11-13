@@ -15,6 +15,8 @@ HALF_DECIMAL = Decimal("0.50")
 EXPORT_XLSX_PATH = BASE_DIR / "produtos_export.xlsx"
 OPTIONAL_CONN_KEYS = {"sslmode", "sslrootcert", "sslcert", "sslkey", "options", "channel_binding"}
 INT32_MAX = 2_147_483_647
+BIGINT_MAX = 9_223_372_036_854_775_807
+QTY_MAX = 1_000_000
 DIMENSION_PATTERN = re.compile(r"\d+(?:[.,]\d+)?")
 
 PRODUCTS_TABLE_SQL = """
@@ -251,12 +253,18 @@ def _create_database(config: Dict[str, Any]) -> None:
         connection.close()
 
 
-def save_products(products: List[Dict[str, Any]], config: Dict[str, Any]) -> int:
+def save_products(
+    products: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    *,
+    export: bool = True,
+) -> int:
     if not products:
         return 0
 
     frames = _build_frames(products)
-    _export_to_excel(frames)
+    if export:
+        _export_to_excel(frames)
     product_ids = frames["products"]["product_id"].tolist()
 
     conn = connect_db(config)
@@ -264,7 +272,9 @@ def save_products(products: List[Dict[str, Any]], config: Dict[str, Any]) -> int
         with conn:
             with conn.cursor() as cur:
                 _ensure_tables(cur)
-                execute_batch(cur, UPSERT_PRODUCTS_SQL, frames["products"].to_dict("records"))
+                records = frames["products"].to_dict("records")
+                _clamp_quantity_fields(records)
+                execute_batch(cur, UPSERT_PRODUCTS_SQL, records)
 
                 _replace_detail(
                     cur,
@@ -345,8 +355,8 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
         p["_sanitized_product_id"] = product_id
 
         available_qty = _coalesce_int(
-            _sanitize_int(p.get("available_qty")),
-            _sanitize_int(p.get("listing_available_qty")),
+            _sanitize_int(p.get("available_qty"), upper_limit=QTY_MAX),
+            _sanitize_int(p.get("listing_available_qty"), upper_limit=QTY_MAX),
         )
         dim_height, dim_width, dim_depth = _split_dimensions(p.get("dimensions_cm"))
 
@@ -384,7 +394,7 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
                 "listing_price_text": p.get("listing_price_text"),
                 "listing_stock_badge": p.get("listing_stock_badge"),
                 "listing_stock_tooltip": p.get("listing_stock_tooltip"),
-                "listing_available_qty": _sanitize_int(p.get("listing_available_qty")),
+                "listing_available_qty": _sanitize_int(p.get("listing_available_qty"), upper_limit=QTY_MAX),
                 "listing_thumbnail": p.get("listing_thumbnail"),
                 "listing_thumbnail_full": p.get("listing_thumbnail_full"),
                 "main_image": p.get("main_image"),
@@ -397,7 +407,8 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
     df_products = pd.DataFrame(product_rows)
     for column in ("product_id", "available_qty", "listing_available_qty"):
         if column in df_products.columns:
-            df_products[column] = df_products[column].apply(_sanitize_int)
+            limit = INT32_MAX if column == "product_id" else QTY_MAX
+            df_products[column] = df_products[column].apply(lambda v, lim=limit: _sanitize_int(v, upper_limit=lim))
 
     if df_products["product_id"].isnull().any():
         raise ValueError("Produto com ID inválido após sanitização.")
@@ -511,7 +522,7 @@ def _coalesce_int(*values: Optional[int]) -> Optional[int]:
     return None
 
 
-def _sanitize_int(value: Any) -> Optional[int]:
+def _sanitize_int(value: Any, upper_limit: int = INT32_MAX) -> Optional[int]:
     if value is None:
         return None
     try:
@@ -526,8 +537,8 @@ def _sanitize_int(value: Any) -> Optional[int]:
             return None
     if integer < 0:
         integer = 0
-    if integer > INT32_MAX:
-        integer = INT32_MAX
+    if integer > upper_limit:
+        integer = upper_limit
     return integer
 
 
@@ -539,27 +550,36 @@ def _product_id_value(product: Dict[str, Any]) -> Optional[int]:
 
 
 def _split_dimensions(value: Any) -> tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+    """
+    Primeiro tenta extrair números já separados (ex.: '8x8x9' ou '8/8/9'). Caso não encontre
+    ao menos 3 valores, aplica a regra 2 primeiros dígitos = altura, últimos 2 = profundidade
+    e o meio = largura.
+    """
     if not value:
         return None, None, None
 
     text = str(value)
-    parts = DIMENSION_PATTERN.findall(text)
-    if len(parts) >= 3:
-        return _to_decimal(parts[0]), _to_decimal(parts[1]), _to_decimal(parts[2])
+    normalized = (
+        text.replace("X", "x")
+        .replace("×", "x")
+        .replace("–", "-")
+        .replace("—", "-")
+    )
+    numeric_parts = DIMENSION_PATTERN.findall(normalized)
+    if len(numeric_parts) >= 3:
+        decimals = [_to_decimal(part) for part in numeric_parts[:3]]
+        if all(part is not None for part in decimals):
+            return decimals[0], decimals[1], decimals[2]
 
-    digits_only = re.sub(r"\D", "", text)
-    if len(digits_only) >= 6:
-        height = digits_only[:2]
-        depth = digits_only[-2:]
-        middle = digits_only[2:-2]
-        return _to_decimal(height), _to_decimal(middle), _to_decimal(depth)
+    digits_only = re.sub(r"\D", "", normalized)
+    if len(digits_only) < 4:
+        return None, None, None
 
-    if len(parts) == 2:
-        return _to_decimal(parts[0]), None, _to_decimal(parts[1])
-    if len(parts) == 1:
-        single = _to_decimal(parts[0])
-        return single, None, None
-    return None, None, None
+    height = digits_only[:2]
+    depth = digits_only[-2:]
+    middle = digits_only[2:-2] or None
+
+    return _to_decimal(height), _to_decimal(middle), _to_decimal(depth)
 
 
 def _to_decimal(value: str | None) -> Optional[Decimal]:
@@ -592,3 +612,28 @@ def _export_to_excel(frames: Dict[str, pd.DataFrame]) -> None:
         for name, frame in frames.items():
             sheet_name = name[:31]
             frame.to_excel(writer, sheet_name=sheet_name, index=False)
+
+
+def export_products_to_excel(products: List[Dict[str, Any]]) -> None:
+    if not products:
+        return
+    frames = _build_frames(products)
+    _export_to_excel(frames)
+
+
+def _clamp_quantity_fields(records: List[Dict[str, Any]]) -> None:
+    for row in records:
+        for field in ("available_qty", "listing_available_qty"):
+            value = row.get(field)
+            if value is None:
+                continue
+            try:
+                integer = int(value)
+            except (TypeError, ValueError):
+                row[field] = None
+                continue
+            if integer < 0:
+                integer = 0
+            if integer > QTY_MAX:
+                integer = QTY_MAX
+            row[field] = integer

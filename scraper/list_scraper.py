@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -16,10 +16,15 @@ ROWS_SELECTOR = "#DataTables_Table_0 tbody tr"
 TABLE_SPINNER_SELECTOR = ".loadding-table"
 MODAL_TRIGGER_SELECTOR = "td:nth-child(8) a#btnViewProduct"
 INT32_MAX = 2_147_483_647
+QTY_MAX = 1_000_000
 _QUANTITY_PATTERN = re.compile(r"\d{1,3}(?:[.\s]\d{3})+|\d+")
 
 
-def scrape_all_products(driver, page_limit: int | None = None) -> List[Dict[str, Any]]:
+def scrape_all_products(
+    driver,
+    page_limit: Optional[int] = None,
+    on_page: Optional[Callable[[List[Dict[str, Any]], int], None]] = None,
+) -> List[Dict[str, Any]]:
     wait = WebDriverWait(driver, 25)
     products: List[Dict[str, Any]] = []
     page = 1
@@ -30,21 +35,27 @@ def scrape_all_products(driver, page_limit: int | None = None) -> List[Dict[str,
         if not rows:
             break
 
-        print(f"[Scraper] Página {page}: {len(rows)} produtos visíveis.")
+        print(f"[Scraper] P?gina {page}: {len(rows)} produtos vis?veis.")
 
+        page_products: List[Dict[str, Any]] = []
         for index in range(len(rows)):
             summary, trigger = _extract_listing_summary(driver, index)
             try:
                 _open_modal(driver, trigger, wait)
                 details = extract_modal_data(driver, summary["product_id"], wait_timeout=25)
-                products.append({**summary, **details})
+                page_products.append({**summary, **details})
             except Exception as exc:
                 summary["scrape_error"] = str(exc)
-                products.append(summary)
+                page_products.append(summary)
                 continue
 
+        if on_page:
+            on_page(page_products, page)
+
+        products.extend(page_products)
+
         if page_limit and page >= page_limit:
-            print(f"[Scraper] Limite de {page_limit} páginas atingido, interrompendo scraping.")
+            print(f"[Scraper] Limite de {page_limit} p?ginas atingido, interrompendo scraping.")
             break
 
         if not _go_to_next_page(driver, wait):
@@ -149,7 +160,7 @@ def _safe_text(context, selector: str) -> str:
         return ""
 
 
-def _parse_quantity(raw: str):
+def _parse_quantity(raw: str, limit: int = QTY_MAX):
     """Extracts the first integer-looking chunk and caps to 32-bit to avoid overflow."""
     if not raw:
         return None
@@ -163,7 +174,7 @@ def _parse_quantity(raw: str):
     if not digits_only:
         return None
     value = int(digits_only)
-    return min(value, INT32_MAX)
+    return min(value, limit)
 
 
 def _open_modal(driver, trigger, wait: WebDriverWait) -> None:
