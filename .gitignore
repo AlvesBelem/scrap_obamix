@@ -61,6 +61,9 @@ build/
 dist/
 *.egg-info/
 
+# Generated exports
+produtos_export.xlsx
+
 # Google credentials (if used later)
 token.json
 credentials.json

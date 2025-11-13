@@ -1,6 +1,6 @@
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import psycopg2
@@ -13,6 +13,7 @@ PRICE_SUFFIX = Decimal("0.90")
 HALF_DECIMAL = Decimal("0.50")
 EXPORT_XLSX_PATH = BASE_DIR / "produtos_export.xlsx"
 OPTIONAL_CONN_KEYS = {"sslmode", "sslrootcert", "sslcert", "sslkey", "options", "channel_binding"}
+INT32_MAX = 2_147_483_647
 
 PRODUCTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS products (
@@ -319,10 +320,20 @@ def _replace_detail(cur, table_name: str, frame: pd.DataFrame, insert_sql: str, 
 
 
 def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
-    df_products = pd.DataFrame(
-        [
+    product_rows = []
+    for p in products:
+        product_id = _sanitize_int(p.get("product_id"))
+        if product_id is None:
+            raise ValueError(f"Produto sem ID válido na coleta: {p}")
+
+        available_qty = _coalesce_int(
+            _sanitize_int(p.get("available_qty")),
+            _sanitize_int(p.get("listing_available_qty")),
+        )
+
+        product_rows.append(
             {
-                "product_id": p["product_id"],
+                "product_id": product_id,
                 "sku": p.get("sku") or p.get("listing_sku"),
                 "name": p.get("name") or p.get("listing_name"),
                 "price_brl": p.get("price_brl"),
@@ -342,7 +353,7 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
                 "notices_html": p.get("notices_html"),
                 "stock_label": p.get("stock_label") or p.get("listing_stock_badge"),
                 "stock_tooltip": p.get("stock_tooltip") or p.get("listing_stock_tooltip"),
-                "available_qty": p.get("available_qty") or p.get("listing_available_qty"),
+                "available_qty": available_qty,
                 "listing_sku": p.get("listing_sku"),
                 "listing_name": p.get("listing_name"),
                 "listing_color": p.get("listing_color"),
@@ -351,7 +362,7 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
                 "listing_price_text": p.get("listing_price_text"),
                 "listing_stock_badge": p.get("listing_stock_badge"),
                 "listing_stock_tooltip": p.get("listing_stock_tooltip"),
-                "listing_available_qty": p.get("listing_available_qty"),
+                "listing_available_qty": _sanitize_int(p.get("listing_available_qty")),
                 "listing_thumbnail": p.get("listing_thumbnail"),
                 "listing_thumbnail_full": p.get("listing_thumbnail_full"),
                 "main_image": p.get("main_image"),
@@ -359,9 +370,9 @@ def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
                 "video_url": p.get("video_url"),
                 "scrape_error": p.get("scrape_error"),
             }
-            for p in products
-        ]
-    )
+        )
+
+    df_products = pd.DataFrame(product_rows)
 
     df_products = _inject_price_venda(df_products)
 
@@ -461,6 +472,33 @@ def _connection_kwargs(config: Dict[str, Any], db_override: str | None = None) -
             params[key] = value
 
     return params
+
+
+def _coalesce_int(*values: Optional[int]) -> Optional[int]:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _sanitize_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        decimal_value = Decimal(str(value))
+        if decimal_value.is_nan():
+            return None
+        integer = int(decimal_value.to_integral_value(rounding=ROUND_DOWN))
+    except (InvalidOperation, ValueError, TypeError):
+        try:
+            integer = int(value)
+        except (TypeError, ValueError):
+            return None
+    if integer < 0:
+        integer = 0
+    if integer > INT32_MAX:
+        integer = INT32_MAX
+    return integer
 
 
 def _export_to_excel(frames: Dict[str, pd.DataFrame]) -> None:
