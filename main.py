@@ -12,7 +12,7 @@ from config.settings import DATABASE_TARGETS, LOGIN_EMAIL, LOGIN_PASSWORD
 LOGIN_URL = "https://app.obaobamix.com.br/login"
 PRODUCTS_URL = "https://app.obaobamix.com.br/admin/products"
 
-DEFAULT_TEST_PAGE_LIMIT = None
+DEFAULT_TEST_PAGE_LIMIT = 3
 PAGE_LIMIT_ENV = os.getenv("SCRAPER_PAGE_LIMIT")
 
 try:
