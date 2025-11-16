@@ -25,6 +25,20 @@ def _env(key: str, default: str | None = None) -> str | None:
     return os.getenv(key, default)
 
 
+def _env_float(key: str, default: float) -> float:
+    """
+    Parses float environment variables with sane fallback and non-negative constraint.
+    """
+    value = _env(key)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else 0.0
+
+
 def _parse_db_url(url: str | None):
     if not url:
         return None
@@ -71,3 +85,5 @@ START_URL = "https://app.obaobamix.com.br/login"
 PRODUCTS_URL = "https://app.obaobamix.com.br/admin/products"
 LOGIN_EMAIL = _env("OBA_EMAIL")
 LOGIN_PASSWORD = _env("OBA_PASSWORD")
+SCRAPER_ROW_DELAY = _env_float("SCRAPER_ROW_DELAY", 0.75)
+SCRAPER_PAGE_DELAY = _env_float("SCRAPER_PAGE_DELAY", 1.5)

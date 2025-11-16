@@ -1,4 +1,5 @@
 import re
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from selenium.common.exceptions import (
@@ -10,6 +11,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+from config.settings import SCRAPER_PAGE_DELAY, SCRAPER_ROW_DELAY
 from scraper.modal_scraper import extract_modal_data
 
 ROWS_SELECTOR = "#DataTables_Table_0 tbody tr"
@@ -40,14 +42,16 @@ def scrape_all_products(
         page_products: List[Dict[str, Any]] = []
         for index in range(len(rows)):
             summary, trigger = _extract_listing_summary(driver, index)
+            result: Dict[str, Any]
             try:
                 _open_modal(driver, trigger, wait)
                 details = extract_modal_data(driver, summary["product_id"], wait_timeout=25)
-                page_products.append({**summary, **details})
+                result = {**summary, **details}
             except Exception as exc:
                 summary["scrape_error"] = str(exc)
-                page_products.append(summary)
-                continue
+                result = summary
+            page_products.append(result)
+            _throttle(SCRAPER_ROW_DELAY)
 
         if on_page:
             on_page(page_products, page)
@@ -58,6 +62,7 @@ def scrape_all_products(
             print(f"[Scraper] Limite de {page_limit} p?ginas atingido, interrompendo scraping.")
             break
 
+        _throttle(SCRAPER_PAGE_DELAY)
         if not _go_to_next_page(driver, wait):
             break
         page += 1
@@ -197,3 +202,11 @@ def _go_to_next_page(driver, wait: WebDriverWait) -> bool:
     link.click()
     _wait_for_table_ready(driver, wait)
     return True
+
+
+def _throttle(delay_seconds: float) -> None:
+    """
+    Applied between interactions to avoid racing against DOM updates.
+    """
+    if delay_seconds and delay_seconds > 0:
+        time.sleep(delay_seconds)
