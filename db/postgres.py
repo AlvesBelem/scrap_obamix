@@ -1,7 +1,7 @@
 import re
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
 import psycopg2
@@ -13,6 +13,7 @@ PRICE_VENDA_MULTIPLIER = Decimal("2.56")
 PRICE_SUFFIX = Decimal("0.90")
 HALF_DECIMAL = Decimal("0.50")
 EXPORT_XLSX_PATH = BASE_DIR / "produtos_export.xlsx"
+EXPORT_CATEGORIES_PATH = BASE_DIR / "produtos_categorias.xlsx"
 OPTIONAL_CONN_KEYS = {"sslmode", "sslrootcert", "sslcert", "sslkey", "options", "channel_binding"}
 INT32_MAX = 2_147_483_647
 BIGINT_MAX = 9_223_372_036_854_775_807
@@ -137,44 +138,16 @@ INSERT INTO products (
     %(main_image_full)s, %(video_url)s, %(scrape_error)s
 )
 ON CONFLICT (product_id) DO UPDATE SET
-    sku = EXCLUDED.sku,
-    name = EXCLUDED.name,
     price_brl = EXCLUDED.price_brl,
     price_venda = EXCLUDED.price_venda,
     price_min_brl = EXCLUDED.price_min_brl,
-    brand = EXCLUDED.brand,
-    model = EXCLUDED.model,
-    color = EXCLUDED.color,
-    voltage = EXCLUDED.voltage,
-    ean = EXCLUDED.ean,
-    ncm = EXCLUDED.ncm,
-    anatel = EXCLUDED.anatel,
-    inmetro = EXCLUDED.inmetro,
-    weight_kg = EXCLUDED.weight_kg,
-    dimensions_cm = EXCLUDED.dimensions_cm,
-    description_html = EXCLUDED.description_html,
-    notices_html = EXCLUDED.notices_html,
     stock_label = EXCLUDED.stock_label,
     stock_tooltip = EXCLUDED.stock_tooltip,
     available_qty = EXCLUDED.available_qty,
-    dimension_height_cm = EXCLUDED.dimension_height_cm,
-    dimension_width_cm = EXCLUDED.dimension_width_cm,
-    dimension_depth_cm = EXCLUDED.dimension_depth_cm,
-    listing_sku = EXCLUDED.listing_sku,
-    listing_name = EXCLUDED.listing_name,
-    listing_color = EXCLUDED.listing_color,
-    listing_brand = EXCLUDED.listing_brand,
-    listing_model = EXCLUDED.listing_model,
     listing_price_text = EXCLUDED.listing_price_text,
     listing_stock_badge = EXCLUDED.listing_stock_badge,
     listing_stock_tooltip = EXCLUDED.listing_stock_tooltip,
     listing_available_qty = EXCLUDED.listing_available_qty,
-    listing_thumbnail = EXCLUDED.listing_thumbnail,
-    listing_thumbnail_full = EXCLUDED.listing_thumbnail_full,
-    main_image = EXCLUDED.main_image,
-    main_image_full = EXCLUDED.main_image_full,
-    video_url = EXCLUDED.video_url,
-    scrape_error = EXCLUDED.scrape_error,
     updated_at = NOW();
 """
 
@@ -262,6 +235,13 @@ def save_products(
     if not products:
         return 0
 
+    existing_product_ids = {
+        _sanitize_int(p.get("product_id"))
+        for p in products
+        if p.get("_existing_sku")
+    }
+    existing_product_ids.discard(None)
+
     frames = _build_frames(products)
     if export:
         _export_to_excel(frames)
@@ -272,9 +252,23 @@ def save_products(
         with conn:
             with conn.cursor() as cur:
                 _ensure_tables(cur)
+                existing_product_ids = {
+                    _sanitize_int(p.get("product_id"))
+                    for p in products
+                    if p.get("_existing_sku")
+                }
+                existing_product_ids.discard(None)
+
                 records = frames["products"].to_dict("records")
                 _clamp_quantity_fields(records)
-                execute_batch(cur, UPSERT_PRODUCTS_SQL, records)
+                existing_rows = _load_existing_rows(cur, product_ids)
+                skip_ids = _filter_unchanged_records(records, existing_rows)
+
+                upsert_records = [row for row in records if row["product_id"] not in skip_ids]
+                if upsert_records:
+                    execute_batch(cur, UPSERT_PRODUCTS_SQL, upsert_records)
+
+                skip_all = existing_product_ids.union(skip_ids)
 
                 _replace_detail(
                     cur,
@@ -282,6 +276,7 @@ def save_products(
                     frames["categories"],
                     INSERT_CATEGORIES_SQL,
                     product_ids,
+                    skip_ids=skip_all,
                 )
                 _replace_detail(
                     cur,
@@ -289,6 +284,7 @@ def save_products(
                     frames["flags"],
                     INSERT_FLAGS_SQL,
                     product_ids,
+                    skip_ids=skip_all,
                 )
                 _replace_detail(
                     cur,
@@ -296,6 +292,7 @@ def save_products(
                     frames["images"],
                     INSERT_IMAGES_SQL,
                     product_ids,
+                    skip_ids=skip_all,
                 )
                 _replace_detail(
                     cur,
@@ -303,6 +300,7 @@ def save_products(
                     frames["keywords"],
                     INSERT_KEYWORDS_SQL,
                     product_ids,
+                    skip_ids=skip_all,
                 )
                 _replace_detail(
                     cur,
@@ -310,6 +308,7 @@ def save_products(
                     frames["titles"],
                     INSERT_TITLES_SQL,
                     product_ids,
+                    skip_ids=skip_all,
                 )
                 _replace_detail(
                     cur,
@@ -317,8 +316,27 @@ def save_products(
                     frames["listing_badges"],
                     INSERT_LISTING_BADGES_SQL,
                     product_ids,
+                    skip_ids=skip_all,
                 )
         return len(products)
+    finally:
+        conn.close()
+
+
+def fetch_existing_skus(config: Dict[str, Any]) -> Set[str]:
+    """
+    Retorna o conjunto de SKUs jǭ persistidos para orientar scraping leve/pesado.
+    """
+    conn = connect_db(config)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                _ensure_tables(cur)
+                cur.execute(
+                    "SELECT COALESCE(sku, listing_sku) AS sku FROM products "
+                    "WHERE COALESCE(sku, listing_sku) IS NOT NULL"
+                )
+                return {row[0] for row in cur.fetchall() if row and row[0]}
     finally:
         conn.close()
 
@@ -337,13 +355,129 @@ def _ensure_tables(cur) -> None:
         cur.execute(ddl)
 
 
-def _replace_detail(cur, table_name: str, frame: pd.DataFrame, insert_sql: str, product_ids: List[int]) -> None:
+def _replace_detail(
+    cur,
+    table_name: str,
+    frame: pd.DataFrame,
+    insert_sql: str,
+    product_ids: List[int],
+    *,
+    skip_ids: Optional[Set[int]] = None,
+) -> None:
     if not product_ids:
         return
-    cur.execute(f"DELETE FROM {table_name} WHERE product_id = ANY(%s)", (product_ids,))
+    allowed_ids = [pid for pid in product_ids if not skip_ids or pid not in skip_ids]
+    if not allowed_ids:
+        return
+    cur.execute(f"DELETE FROM {table_name} WHERE product_id = ANY(%s)", (allowed_ids,))
     if frame.empty:
         return
-    execute_batch(cur, insert_sql, frame.to_dict("records"))
+    allowed_frame = frame[frame["product_id"].isin(allowed_ids)]
+    if allowed_frame.empty:
+        return
+    execute_batch(cur, insert_sql, allowed_frame.to_dict("records"))
+
+
+FIELDS_TO_COMPARE = {
+    "price_brl",
+    "price_venda",
+    "price_min_brl",
+    "stock_label",
+    "stock_tooltip",
+    "available_qty",
+    "listing_price_text",
+    "listing_stock_badge",
+    "listing_stock_tooltip",
+    "listing_available_qty",
+}
+
+
+def _load_existing_rows(cur, product_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    if not product_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT product_id,
+               price_brl, price_venda, price_min_brl,
+               stock_label, stock_tooltip, available_qty,
+               listing_price_text, listing_stock_badge, listing_stock_tooltip, listing_available_qty
+        FROM products
+        WHERE product_id = ANY(%s)
+        """,
+        (product_ids,),
+    )
+    rows = cur.fetchall()
+    result: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        (
+            pid,
+            price_brl,
+            price_venda,
+            price_min_brl,
+            stock_label,
+            stock_tooltip,
+            available_qty,
+            listing_price_text,
+            listing_stock_badge,
+            listing_stock_tooltip,
+            listing_available_qty,
+        ) = row
+        result[pid] = {
+            "price_brl": price_brl,
+            "price_venda": price_venda,
+            "price_min_brl": price_min_brl,
+            "stock_label": stock_label,
+            "stock_tooltip": stock_tooltip,
+            "available_qty": _sanitize_int(available_qty, upper_limit=QTY_MAX),
+            "listing_price_text": listing_price_text,
+            "listing_stock_badge": listing_stock_badge,
+            "listing_stock_tooltip": listing_stock_tooltip,
+            "listing_available_qty": _sanitize_int(listing_available_qty, upper_limit=QTY_MAX),
+        }
+    return result
+
+
+def _filter_unchanged_records(
+    records: List[Dict[str, Any]], existing_rows: Dict[int, Dict[str, Any]]
+) -> Set[int]:
+    skip_ids: Set[int] = set()
+    for row in records:
+        pid = row.get("product_id")
+        if pid is None:
+            continue
+        existing = existing_rows.get(pid)
+        if existing is None:
+            continue
+        if _is_same_price_stock(row, existing):
+            skip_ids.add(pid)
+    return skip_ids
+
+
+def _is_same_price_stock(new_row: Dict[str, Any], existing_row: Dict[str, Any]) -> bool:
+    for field in FIELDS_TO_COMPARE:
+        if field not in existing_row:
+            return False
+        if _normalize_value(new_row.get(field)) != _normalize_value(existing_row.get(field)):
+            return False
+    return True
+
+
+def _normalize_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        try:
+            return value.quantize(Decimal("0.01"))
+        except InvalidOperation:
+            return None
+    if isinstance(value, (int, float, str)):
+        # Try numeric normalization first
+        try:
+            decimal_value = Decimal(str(value))
+            return decimal_value.quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError):
+            pass
+    return value
 
 
 def _build_frames(products: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
@@ -612,6 +746,25 @@ def _export_to_excel(frames: Dict[str, pd.DataFrame]) -> None:
         for name, frame in frames.items():
             sheet_name = name[:31]
             frame.to_excel(writer, sheet_name=sheet_name, index=False)
+    _export_categories_summary(frames)
+
+
+def _export_categories_summary(frames: Dict[str, pd.DataFrame]) -> None:
+    products = frames.get("products")
+    categories = frames.get("categories")
+    if products is None or categories is None or products.empty or categories.empty:
+        return
+    summary = categories.merge(
+        products[["product_id", "name"]],
+        on="product_id",
+        how="left",
+    )
+    summary = summary[["product_id", "name", "category"]]
+    summary = summary.dropna(subset=["product_id"])
+    summary = summary.drop_duplicates()
+    EXPORT_CATEGORIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(EXPORT_CATEGORIES_PATH, engine="openpyxl") as writer:
+        summary.to_excel(writer, sheet_name="categorias", index=False)
 
 
 def export_products_to_excel(products: List[Dict[str, Any]]) -> None:

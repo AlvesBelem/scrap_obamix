@@ -6,7 +6,7 @@ from selenium.webdriver.common.by import By
 
 from scraper.browser import start_browser
 from scraper.list_scraper import scrape_all_products
-from db.postgres import save_products, export_products_to_excel
+from db.postgres import save_products, export_products_to_excel, fetch_existing_skus
 from config.settings import DATABASE_TARGETS, LOGIN_EMAIL, LOGIN_PASSWORD
 
 LOGIN_URL = "https://app.obaobamix.com.br/login"
@@ -52,6 +52,15 @@ def _prefill_login_form(driver) -> None:
 
 
 def main():
+    existing_skus = set()
+    if DATABASE_TARGETS:
+        primary_label, primary_db_config = DATABASE_TARGETS[0]
+        try:
+            existing_skus = fetch_existing_skus(primary_db_config)
+            print(f"[Scraper][{primary_label}] {len(existing_skus)} SKUs carregados para scraping seletivo.")
+        except Exception as exc:
+            print(f"[Scraper] Nǜo foi poss��vel carregar SKUs existentes: {exc}")
+
     driver = start_browser()
     try:
         prompt_manual_login(driver)
@@ -67,10 +76,12 @@ def main():
                     print(f"[Scraper][{label}][Página {page_number}] {persisted} registros gravados.")
                 except Exception as exc:
                     print(f"[Scraper][{label}][Página {page_number}] Falha ao gravar: {exc}")
-                    if label == "local":
-                        raise
+                    # Se nao houver banco ativo, apenas continua o scraping
+                    continue
 
-        products = scrape_all_products(driver, page_limit=PAGE_LIMIT, on_page=persist_page)
+        products = scrape_all_products(
+            driver, page_limit=PAGE_LIMIT, on_page=persist_page, known_skus=existing_skus
+        )
         print(f"[Scraper] {len(products)} produtos coletados.")
 
         if products:

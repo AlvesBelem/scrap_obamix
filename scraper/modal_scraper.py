@@ -15,7 +15,7 @@ TAB_CONTENT_TIMEOUT = 15
 _QUANTITY_PATTERN = re.compile(r"\d{1,3}(?:[.\s]\d{3})+|\d+")
 
 
-def extract_modal_data(driver, product_id: int, wait_timeout: int = 25) -> Dict[str, Any]:
+def extract_modal_data(driver, product_id: int, wait_timeout: int = 25, light: bool = False) -> Dict[str, Any]:
     """
     Captura todos os campos visíveis no modal do produto, incluindo texto,
     listas, flags e links de imagem.
@@ -38,19 +38,6 @@ def extract_modal_data(driver, product_id: int, wait_timeout: int = 25) -> Dict[
     data["price_text"] = price_text
     data["price_brl"] = _parse_decimal(price_text)
 
-    data["brand"] = _text_or_none(modal, "#modal-brand")
-    data["model"] = _text_or_none(modal, "#modal-model")
-    data["color"] = _text_or_none(modal, "#modal-color")
-    data["voltage"] = _text_or_none(modal, "#modal-voltage")
-    data["ean"] = _text_or_none(modal, "#modal-ean")
-    data["ncm"] = _text_or_none(modal, "#modal-ncm")
-    data["anatel"] = _text_or_none(modal, "#modal-anatel")
-    data["inmetro"] = _text_or_none(modal, "#modal-inmetro")
-
-    weight_text = _text_or_none(modal, "#modal-weight")
-    data["weight_kg"] = _parse_decimal(weight_text)
-    data["dimensions_cm"] = _text_or_none(modal, "#modal-size")
-
     stock_badge = modal.find_elements(By.CSS_SELECTOR, "#modal-inv span.badge")
     if stock_badge:
         badge = stock_badge[0]
@@ -63,6 +50,30 @@ def extract_modal_data(driver, product_id: int, wait_timeout: int = 25) -> Dict[
         data["stock_label"] = None
         data["stock_tooltip"] = ""
         data["available_qty"] = None
+
+    price_min_alert = modal.find_elements(By.ID, "price-min-alert")
+    price_min_value = None
+    if price_min_alert:
+        is_hidden = "hidden" in (price_min_alert[0].get_attribute("class") or "")
+        if not is_hidden:
+            price_min_value = _parse_decimal(_text_or_none(modal, "#price-min"))
+    data["price_min_brl"] = price_min_value
+
+    if light:
+        return data
+
+    data["brand"] = _text_or_none(modal, "#modal-brand")
+    data["model"] = _text_or_none(modal, "#modal-model")
+    data["color"] = _text_or_none(modal, "#modal-color")
+    data["voltage"] = _text_or_none(modal, "#modal-voltage")
+    data["ean"] = _text_or_none(modal, "#modal-ean")
+    data["ncm"] = _text_or_none(modal, "#modal-ncm")
+    data["anatel"] = _text_or_none(modal, "#modal-anatel")
+    data["inmetro"] = _text_or_none(modal, "#modal-inmetro")
+
+    weight_text = _text_or_none(modal, "#modal-weight")
+    data["weight_kg"] = _parse_decimal(weight_text)
+    data["dimensions_cm"] = _text_or_none(modal, "#modal-size")
 
     data["categories"] = _collect_badge_values(modal, "#modal-categories span.badge")
     data["flags"] = _collect_labeled_badges(modal, "#modal-flags span")
@@ -92,14 +103,6 @@ def extract_modal_data(driver, product_id: int, wait_timeout: int = 25) -> Dict[
     data["main_image_full"] = main_image_href
 
     data["images"] = _collect_gallery(modal, main_image_src, main_image_href)
-
-    price_min_alert = modal.find_elements(By.ID, "price-min-alert")
-    price_min_value = None
-    if price_min_alert:
-        is_hidden = "hidden" in (price_min_alert[0].get_attribute("class") or "")
-        if not is_hidden:
-            price_min_value = _parse_decimal(_text_or_none(modal, "#price-min"))
-    data["price_min_brl"] = price_min_value
 
     try:
         return data

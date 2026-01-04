@@ -26,6 +26,7 @@ def scrape_all_products(
     driver,
     page_limit: Optional[int] = None,
     on_page: Optional[Callable[[List[Dict[str, Any]], int], None]] = None,
+    known_skus: Optional[set[str]] = None,
 ) -> List[Dict[str, Any]]:
     wait = WebDriverWait(driver, 25)
     products: List[Dict[str, Any]] = []
@@ -42,14 +43,21 @@ def scrape_all_products(
         page_products: List[Dict[str, Any]] = []
         for index in range(len(rows)):
             summary, trigger = _extract_listing_summary(driver, index)
+            listing_sku = summary.get("listing_sku")
+            known = bool(known_skus) and listing_sku and listing_sku in known_skus
             result: Dict[str, Any]
             try:
                 _open_modal(driver, trigger, wait)
-                details = extract_modal_data(driver, summary["product_id"], wait_timeout=25)
+                details = extract_modal_data(
+                    driver, summary["product_id"], wait_timeout=25, light=known
+                )
                 result = {**summary, **details}
+                if known:
+                    result["scrape_error"] = None
             except Exception as exc:
                 summary["scrape_error"] = str(exc)
                 result = summary
+            result["_existing_sku"] = bool(known)
             page_products.append(result)
             _throttle(SCRAPER_ROW_DELAY)
 
