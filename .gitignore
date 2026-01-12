@@ -64,6 +64,7 @@ dist/
 
 # Generated exports
 produtos_export.xlsx
+produtos_categorias.xlsx
 
 # Google credentials (if used later)
 token.json
